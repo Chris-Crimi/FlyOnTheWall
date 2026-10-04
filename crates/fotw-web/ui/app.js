@@ -259,9 +259,133 @@ function renderList(meetings) {
   }
 }
 
+// The meeting title, with an inline rename. The title is the one name the whole
+// app reads from: this list, the detail header here, and the sharing document's
+// own heading and download filename. So a rename typed here is also how two
+// calls with the same client stop sharing one generic document name. The daemon
+// is the source of truth and validates the input; a human title then survives
+// enrichment untouched (the `replaceable` guard), so no draft is regenerated.
+function renderTitleHeader(detail) {
+  const row = document.createElement("div");
+  row.className = "detail-title";
+  const heading = text("h2", detail.meeting.title || "Untitled meeting");
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "rename";
+  rename.textContent = "Rename";
+  // Out of context "Rename" says nothing about what — the pane has several
+  // controls — so the accessible name carries the object (WCAG 2.5.3).
+  rename.setAttribute("aria-label", "Rename this meeting");
+  rename.addEventListener("click", () => beginRename(detail, row, heading));
+  row.appendChild(heading);
+  row.appendChild(rename);
+  return row;
+}
+
+// Swap the static title for an input and Save/Cancel, restoring the header on
+// either outcome. Enter saves, Escape cancels.
+function beginRename(detail, row, heading) {
+  const current = detail.meeting.title || "";
+  clear(row);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input";
+  input.value = current;
+  // Matches the daemon's MAX_TITLE_CHARS; the server re-checks regardless.
+  input.maxLength = 100;
+  input.setAttribute("aria-label", "Meeting name");
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "rename-save";
+  save.textContent = "Save";
+  save.setAttribute("aria-label", "Save the meeting name");
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "rename-cancel";
+  cancel.textContent = "Cancel";
+  cancel.setAttribute("aria-label", "Cancel renaming");
+
+  const restore = () => {
+    clear(row);
+    row.appendChild(heading);
+    const again = document.createElement("button");
+    again.type = "button";
+    again.className = "rename";
+    again.textContent = "Rename";
+    again.setAttribute("aria-label", "Rename this meeting");
+    again.addEventListener("click", () => beginRename(detail, row, heading));
+    row.appendChild(again);
+  };
+
+  let busy = false;
+  const commit = async () => {
+    if (busy) return;
+    const title = input.value.trim();
+    if (title === "") {
+      say("Enter a name for this meeting.");
+      input.focus();
+      return;
+    }
+    if (title === current) {
+      restore();
+      return;
+    }
+    busy = true;
+    save.disabled = true;
+    cancel.disabled = true;
+    try {
+      const body = await api(
+        "/api/meetings/" + encodeURIComponent(detail.meeting.id) + "/document",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "rename", title }),
+        },
+      );
+      if (body.error) {
+        // The daemon refused it (too long, empty once normalised). Stay in the
+        // editor so the typed name is not lost.
+        say(body.error);
+        busy = false;
+        save.disabled = false;
+        cancel.disabled = false;
+        input.focus();
+        return;
+      }
+      say("Renamed.");
+      // The title feeds both panes: redraw this meeting and refresh the list so
+      // the left menu shows the new name without a reload.
+      openMeeting(detail.meeting.id);
+      loadMeetings();
+    } catch (e) {
+      say("Could not rename that meeting.");
+      busy = false;
+      save.disabled = false;
+      cancel.disabled = false;
+    }
+  };
+
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      commit();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      restore();
+    }
+  });
+  save.addEventListener("click", commit);
+  cancel.addEventListener("click", restore);
+  row.appendChild(input);
+  row.appendChild(save);
+  row.appendChild(cancel);
+  input.focus();
+  input.select();
+}
+
 function renderDetail(detail) {
   clear(el.detail);
-  el.detail.appendChild(text("h2", detail.meeting.title || "Untitled meeting"));
+  el.detail.appendChild(renderTitleHeader(detail));
   el.detail.appendChild(text("p", when(detail.meeting.started_at_ms), "meta"));
 
   const actions = actionsRow(detail);

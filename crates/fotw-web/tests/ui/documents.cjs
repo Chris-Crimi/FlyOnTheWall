@@ -42,6 +42,15 @@ test('Markdown source cannot embed active HTML or remote images', () => {
   assert.match(md, /\\<script\\>/);
   assert.equal(context.sharingFilename({title:'../../a/b: résumé?'}), 'ab résumé');
 });
+test('download name follows the live meeting title over the stored document title', () => {
+  // The meeting title is the shared name, so two calls with one client that
+  // once produced the same generic document name download differently once
+  // renamed — even before the draft is regenerated.
+  assert.equal(context.sharingFilename({title:'Client recap'}, 'Acme Q3 kickoff'), 'Acme Q3 kickoff');
+  // An untitled meeting (blank title) keeps the document's own inferred name.
+  assert.equal(context.sharingFilename({title:'Client recap'}, '   '), 'Client recap');
+  assert.equal(context.sharingFilename({title:'Client recap'}, ''), 'Client recap');
+});
 
 // Small DOM harness for the asynchronous create/save/download workflow.
 function workflow() {

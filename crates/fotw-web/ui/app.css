@@ -399,6 +399,50 @@ section {
   cursor: not-allowed;
 }
 
+/* The meeting title and its inline rename. The title is the one name the list,
+   this header, and the sharing document all read from, so renaming it here is
+   also how two calls with one client stop sharing a generic document name.
+   `baseline` keeps the Rename control sitting on the title's baseline, and the
+   row wraps rather than pushing the button off a narrow pane. Neutral chrome
+   like the copy/gh buttons: renaming is reversible and harmless, not a caution. */
+.detail-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+.detail-title h2 {
+  margin: 0;
+}
+.rename,
+.rename-save,
+.rename-cancel {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.rename-save:disabled,
+.rename-cancel:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.rename-input {
+  font: inherit;
+  padding: 4px 8px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 16rem;
+  max-width: 100%;
+}
+
 /* The per-meeting controls, in one row. `.gh-actions` needed no rule when it
    wrapped a single button; a row of three does, because `appendChild` leaves no
    whitespace between siblings and the buttons would butt into one slab.

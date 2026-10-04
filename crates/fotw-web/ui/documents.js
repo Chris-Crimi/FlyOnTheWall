@@ -45,11 +45,16 @@ function sharingMarkdown(editor) {
   if (next < doc.source_segments) md += "\n[Remaining conversation omitted from sharing copy.]\n";
   return md;
 }
-function sharingFilename(doc) {
-  return (doc.title.replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 100) || "Meeting document");
+function sharingFilename(doc, meetingTitle) {
+  // The meeting title is the one shared name — prefer it so a download matches
+  // the library menu and the detail header, even for a draft generated before a
+  // rename. Fall back to the document's own title, which for an untitled
+  // meeting is the model-inferred one.
+  const name = (meetingTitle && meetingTitle.trim()) || doc.title || "";
+  return (name.replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 100) || "Meeting document");
 }
 function downloadSharingDocument(editor) {
-  const filename = sharingFilename(editor.document) + ".md";
+  const filename = sharingFilename(editor.document, editor.meetingTitle) + ".md";
   const url = URL.createObjectURL(new Blob([sharingMarkdown(editor)], {type: "text/markdown;charset=utf-8"}));
   const a = document.createElement("a");
   a.href = url; a.download = filename;
@@ -91,7 +96,7 @@ function printSharingDocument(editor) {
   sharingPreview(editor, root);
   document.body.appendChild(root);
   const oldTitle = document.title;
-  document.title = sharingFilename(editor.document);
+  document.title = sharingFilename(editor.document, editor.meetingTitle);
   const cleanup = () => { root.remove(); document.title = oldTitle; };
   window.addEventListener("afterprint", cleanup, { once: true });
   window.print();
@@ -113,6 +118,9 @@ function mountSharingDocument(detail, host) {
       excluded: new Set(), message: "Loading document…" };
     sharingEditors.set(id, editor);
   }
+  // Refreshed on every mount, not just creation: after a rename the detail pane
+  // re-mounts with the new meeting title, and the download/print name reads it.
+  editor.meetingTitle = detail.meeting.title || "";
   const panel = document.createElement("section");
   panel.className = "sharing-panel";
   host.appendChild(panel);

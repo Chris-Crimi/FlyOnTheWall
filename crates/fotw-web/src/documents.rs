@@ -2,6 +2,12 @@
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
+/// Longest a user-supplied meeting title may be, in characters. Generous beside
+/// a machine title (`fotw_summarize::title::TITLE_BUDGET_BYTES`, 64 bytes): a
+/// person renaming a call may want more words than an engine is allowed to mint,
+/// but not a paragraph in the left menu. The daemon normalises within this.
+pub const MAX_TITLE_CHARS: usize = 100;
+
 /// A source excerpt, copied verbatim by code rather than rewritten by a model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentExcerpt {
@@ -64,7 +70,10 @@ pub fn corrected_names(text: &str, corrections: &[NameCorrection]) -> String {
 /// The editable draft and its selected source material.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SharingDocument {
-    /// Document title, inferred from the meeting's purpose.
+    /// Document title. Follows the meeting's own title (the name shown in the
+    /// library list and detail header), so the same client's two calls read
+    /// differently and a share matches what the left menu calls it. Only a
+    /// still-default meeting title falls back to a model-inferred one.
     pub title: String,
     /// User-confirmed names survive regeneration; they never relabel voices.
     #[serde(default)]
@@ -100,6 +109,10 @@ pub enum DocumentAction {
     Configure,
     /// Remember a spelling correction for this meeting and its derived prose.
     CorrectName,
+    /// Rename the meeting itself. The document title follows it, and the new
+    /// name shows in the library list and detail header. Human renames survive
+    /// enrichment (the `replaceable` guard), so no engine call is involved.
+    Rename,
 }
 
 /// Bounded user preferences and optimistic revision for a document operation.
@@ -124,6 +137,9 @@ pub struct DocumentRequest {
     pub incorrect_name: String,
     /// Explicit user spelling, for CorrectName.
     pub correct_name: String,
+    /// New meeting name, for Rename. The daemon normalises whitespace and
+    /// control characters; the empty string is rejected here.
+    pub title: String,
 }
 
 impl DocumentRequest {
@@ -147,6 +163,13 @@ impl DocumentRequest {
             && self.markdown.len() <= 100_000
             && self.revision >= 0
             && (!matches!(self.action, DocumentAction::Save) || !self.markdown.trim().is_empty())
+            // A rename needs a real name, and no more than the left menu can show.
+            // Counted in characters, not bytes, so a non-Latin title is not
+            // penalised; a generous byte ceiling still bounds the payload.
+            && self.title.len() <= MAX_TITLE_CHARS * 4
+            && (!matches!(self.action, DocumentAction::Rename)
+                || (!self.title.trim().is_empty()
+                    && self.title.chars().count() <= MAX_TITLE_CHARS))
     }
 }
 
@@ -212,5 +235,24 @@ mod name_tests {
             };
             assert!(!req.valid());
         }
+    }
+    #[test]
+    fn rename_requires_a_nonempty_title_within_the_menu_length() {
+        let rename = |title: &str| DocumentRequest {
+            action: DocumentAction::Rename,
+            title: title.into(),
+            ..DocumentRequest::default()
+        };
+        // A real name passes; blank or whitespace-only does not.
+        assert!(rename("Acme Q3 kickoff").valid());
+        assert!(!rename("").valid());
+        assert!(!rename("   ").valid());
+        // Counted in characters: the ceiling holds, one over it fails.
+        assert!(rename(&"a".repeat(MAX_TITLE_CHARS)).valid());
+        assert!(!rename(&"a".repeat(MAX_TITLE_CHARS + 1)).valid());
+        // A non-Latin title is measured the same way, not by byte length.
+        assert!(rename(&"猫".repeat(MAX_TITLE_CHARS)).valid());
+        // The title field is ignored by other actions, so a blank one is fine.
+        assert!(DocumentRequest::default().valid());
     }
 }

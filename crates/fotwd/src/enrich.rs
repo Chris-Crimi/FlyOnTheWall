@@ -70,7 +70,7 @@ use crate::summarize::{SummarizeRunError, summarize_meeting_on, title_meeting_on
 /// `fallback_title`'s answer is a sentence lifted from the transcript and
 /// carries no prefix at all, so a prefix test alone classifies this machine's
 /// own first-utterance title as a human rename and refuses to ever improve it.
-const FALLBACK_PREFIX: &str = "Untitled recording";
+pub(crate) const FALLBACK_PREFIX: &str = "Untitled recording";
 
 /// The `settings` key the per-meeting enrichment stamps live under.
 ///
@@ -130,8 +130,9 @@ pub struct EnrichReceipt {
     ///
     /// What makes a machine title replaceable. A later pass may improve a title
     /// this machine minted; a rename typed by a human changes the string, stops
-    /// matching, and is never touched again. There is no rename endpoint yet —
-    /// this guard is what will make one safe (REQUIREMENTS.md:75).
+    /// matching, and is never touched again. This is what makes the document
+    /// `Rename` action safe: a user title survives enrichment untouched
+    /// (REQUIREMENTS.md:75).
     pub minted_title: String,
 }
 

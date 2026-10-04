@@ -97,6 +97,11 @@ struct Input {
     started_at_ms: i64,
     notes: String,
     name_corrections: Vec<fotw_web::documents::NameCorrection>,
+    /// The meeting's own title — what the library list and detail header show.
+    /// The document title follows it so a share matches the menu and two calls
+    /// with one client read differently. A still-default title (empty or the
+    /// `Untitled recording` fallback) yields to the model's inferred title.
+    meeting_title: String,
 }
 
 fn prepare(db: &mut Db, id: &str) -> Result<Input, String> {
@@ -135,6 +140,7 @@ fn prepare(db: &mut Db, id: &str) -> Result<Input, String> {
         transcript,
         started_at_ms: meeting.started_at_ms,
         notes: notes.chars().take(8000).collect(),
+        meeting_title: meeting.title.clone(),
     })
 }
 
@@ -236,9 +242,12 @@ fn decode(raw: &str, input: &Input) -> Result<SharingDocument, String> {
                 .to_owned(),
         );
     }
+    // The document's own heading and stored title follow the meeting's title,
+    // not the model's, except when the meeting is still untitled.
+    let title = effective_title(&input.meeting_title, &draft.title);
     let mut markdown = format!(
         "# {}\n\n{}\n\nPrepared for: {}\n",
-        single_line(&draft.title),
+        single_line(&title),
         single_line(&draft.purpose),
         single_line(&draft.audience)
     );
@@ -304,7 +313,7 @@ fn decode(raw: &str, input: &Input) -> Result<SharingDocument, String> {
         })
         .collect();
     Ok(SharingDocument {
-        title: draft.title,
+        title,
         purpose: draft.purpose,
         audience: draft.audience,
         markdown: fotw_web::documents::corrected_names(&markdown, &input.name_corrections),
@@ -317,6 +326,21 @@ fn decode(raw: &str, input: &Input) -> Result<SharingDocument, String> {
 }
 fn single_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The title the document should carry: the meeting's own, so a share matches
+/// the library menu and one client's two calls read differently. A still-default
+/// meeting title — empty, or the machine `Untitled recording` fallback — has no
+/// meaning to show, so the model's inferred title stands in. A human rename (via
+/// [`DocumentAction::Rename`]) and an enrichment-minted title both flow through
+/// here because both land in the meeting's `title`.
+fn effective_title(meeting_title: &str, model_title: &str) -> String {
+    let trimmed = meeting_title.trim();
+    if trimmed.is_empty() || trimmed.starts_with(crate::enrich::FALLBACK_PREFIX) {
+        model_title.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 async fn generate(
@@ -419,6 +443,13 @@ impl Documents {
             generation: tokio::sync::Semaphore::new(1),
         }
     }
+
+    /// The controller owns the only library handle; a rename test needs to read
+    /// the meeting title back after `run` returns to prove it persisted.
+    #[cfg(test)]
+    fn db(&self) -> std::sync::MutexGuard<'_, Db> {
+        self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 impl DocumentControl for Documents {
     fn run(
@@ -495,6 +526,32 @@ impl DocumentControl for Documents {
                         correct_current_summary(&mut db, &id_load, &doc.name_corrections)?;
                         Ok((saved, None))
                     }
+                    DocumentAction::Rename => {
+                        // The meeting title is the single source of truth: the
+                        // library list, the detail header, and the document
+                        // title all read from it. Normalise to one line and drop
+                        // non-whitespace control characters, then keep it within
+                        // what the menu can show. No engine, no document save —
+                        // renaming a call must not mint a new draft revision, and
+                        // the `replaceable` guard keeps enrichment off a human
+                        // title from here on.
+                        let cleaned: String = prefs_load
+                            .title
+                            .chars()
+                            .filter(|c| !c.is_control() || c.is_whitespace())
+                            .collect();
+                        let title = single_line(&cleaned);
+                        if title.is_empty() {
+                            return Err("Enter a name for this meeting.".to_owned());
+                        }
+                        if title.chars().count() > fotw_web::documents::MAX_TITLE_CHARS {
+                            return Err("That name is too long for the meeting list.".to_owned());
+                        }
+                        db.meetings()
+                            .set_title(&id_load, &title)
+                            .map_err(|_| "Could not rename this meeting.".to_owned())?;
+                        Ok((read(&mut db, &id_load)?, None))
+                    }
                     DocumentAction::Generate => {
                         if state.revision != prefs_load.revision {
                             return Err(STALE.to_owned());
@@ -563,6 +620,7 @@ mod tests {
             started_at_ms: 1784037912686,
             notes: "".into(),
             name_corrections: Vec::new(),
+            meeting_title: String::new(),
         }
     }
     fn draft() -> serde_json::Value {
@@ -704,6 +762,62 @@ mod tests {
         let doc = decode(&client.to_string(), &input()).unwrap();
         assert!(doc.markdown.contains("Agreed deliverables"));
         assert!(!doc.markdown.contains("Launch steps"));
+    }
+    #[test]
+    fn document_title_follows_the_meeting_title_and_falls_back_when_untitled() {
+        // A named meeting: the heading and the stored title take the meeting's
+        // own name, so a share matches the left-menu label and two calls with
+        // one client no longer collide on a generic model title.
+        let mut named = input();
+        named.meeting_title = "Acme Q3 kickoff".into();
+        let doc = decode(&draft().to_string(), &named).unwrap();
+        assert_eq!(doc.title, "Acme Q3 kickoff");
+        assert!(doc.markdown.starts_with("# Acme Q3 kickoff\n"));
+        // A still-default title carries no meaning to show, so the model's
+        // inferred title stands in — both the empty and the fallback form.
+        for still_default in ["", "Untitled recording — 2026-01-02 03:04 UTC"] {
+            let mut untitled = input();
+            untitled.meeting_title = still_default.into();
+            assert_eq!(
+                decode(&draft().to_string(), &untitled).unwrap().title,
+                "Launch plan brief"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn rename_persists_the_meeting_title_and_rejects_an_empty_one() {
+        use fotw_secrets::InMemoryKeyStore;
+        let mut db = Db::open_in_memory(&fotw_store::DbKey::from_bytes([7; 32])).unwrap();
+        let id = meeting(&mut db);
+        let store: &'static InMemoryKeyStore = Box::leak(Box::new(InMemoryKeyStore::new()));
+        let docs = Documents::new(db, store);
+        // Whitespace and control characters are normalised to one clean line.
+        docs.run(
+            id.clone(),
+            DocumentRequest {
+                action: DocumentAction::Rename,
+                title: "  Acme\tQ3\u{0007}\n kickoff  ".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(docs.db().meetings().get(&id).unwrap().title, "Acme Q3 kickoff");
+        // A name that is empty once normalised is refused, and the good title
+        // it would have replaced is left intact.
+        assert!(
+            docs.run(
+                id.clone(),
+                DocumentRequest {
+                    action: DocumentAction::Rename,
+                    title: "\u{0007}".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(docs.db().meetings().get(&id).unwrap().title, "Acme Q3 kickoff");
     }
     #[test]
     fn invalid_or_excluded_evidence_never_becomes_a_draft() {
