@@ -671,7 +671,10 @@ async fn spawn_session(
     // until here it still holds our entry.
     {
         let mut slot = live.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.as_ref().is_some_and(|s| s.started_at_ms == started_at_ms) {
+        if slot
+            .as_ref()
+            .is_some_and(|s| s.started_at_ms == started_at_ms)
+        {
             *slot = None;
         }
     }

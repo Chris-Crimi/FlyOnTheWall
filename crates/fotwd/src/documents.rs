@@ -448,7 +448,9 @@ impl Documents {
     /// the meeting title back after `run` returns to prove it persisted.
     #[cfg(test)]
     fn db(&self) -> std::sync::MutexGuard<'_, Db> {
-        self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 impl DocumentControl for Documents {
@@ -802,7 +804,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(docs.db().meetings().get(&id).unwrap().title, "Acme Q3 kickoff");
+        assert_eq!(
+            docs.db().meetings().get(&id).unwrap().title,
+            "Acme Q3 kickoff"
+        );
         // A name that is empty once normalised is refused, and the good title
         // it would have replaced is left intact.
         assert!(
@@ -817,7 +822,10 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(docs.db().meetings().get(&id).unwrap().title, "Acme Q3 kickoff");
+        assert_eq!(
+            docs.db().meetings().get(&id).unwrap().title,
+            "Acme Q3 kickoff"
+        );
     }
     #[test]
     fn invalid_or_excluded_evidence_never_becomes_a_draft() {

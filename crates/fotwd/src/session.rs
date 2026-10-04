@@ -28,7 +28,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fotw_audio::clock::Clock;
-use fotw_audio::supervisor::{CaptureGap, CaptureSupervisor, GapKind, HealthEvent, SupervisorConfig};
+use fotw_audio::supervisor::{
+    CaptureGap, CaptureSupervisor, GapKind, HealthEvent, SupervisorConfig,
+};
 use fotw_audio::watchdog::{ActivityCounters, OutputActivity, TapActivity};
 use fotw_audio::{
     AudioPlatform, AudioTap, CaptureTimestamp, DeviceId, FormatRequest, FrameFlags, FrameSink,
@@ -595,7 +597,15 @@ fn supervise_channel(
         }
 
         for gap in gaps {
-            apply_leg_gap(wal, meta.channel, meta.label, &gap, meta.wal_format, epoch_ns, scratch)?;
+            apply_leg_gap(
+                wal,
+                meta.channel,
+                meta.label,
+                &gap,
+                meta.wal_format,
+                epoch_ns,
+                scratch,
+            )?;
         }
     }
     Ok(())
@@ -3181,7 +3191,12 @@ mod supervised_recovery_tests {
         id: TapId,
         wal_format: TrackFormat,
         clock: &Arc<ManualClock>,
-    ) -> (ChannelMeta, RingConsumer, Arc<ActivityCounters>, LegCounters) {
+    ) -> (
+        ChannelMeta,
+        RingConsumer,
+        Arc<ActivityCounters>,
+        LegCounters,
+    ) {
         let channels = wal_format.channels;
         let format = StreamFormat::new(wal_format.sample_rate_hz, channels, SampleFormat::F32);
         let (producer, consumer) = AudioRing::with_capacity_frames(48_000);
@@ -3260,12 +3275,22 @@ mod supervised_recovery_tests {
         LegChannel::System
             .write(&mut wal, &vec![0.5f32; 48_000 * 2])
             .unwrap();
-        LegChannel::Mic.write(&mut wal, &vec![0.5f32; 48_000]).unwrap();
+        LegChannel::Mic
+            .write(&mut wal, &vec![0.5f32; 48_000])
+            .unwrap();
 
         // Five seconds in which neither tap delivered a buffer: both starve,
         // both rebuild, and each owes the stream five seconds of silence.
         clock.advance(Duration::from_secs(5));
-        supervise_channel(&mut wal, &mut system, &mut system_cons, &plat, 0, &mut scratch).unwrap();
+        supervise_channel(
+            &mut wal,
+            &mut system,
+            &mut system_cons,
+            &plat,
+            0,
+            &mut scratch,
+        )
+        .unwrap();
         supervise_channel(&mut wal, &mut mic, &mut mic_cons, &plat, 0, &mut scratch).unwrap();
 
         assert_eq!(system.supervisor.rebuilds(), 1, "the system tap rebuilt");

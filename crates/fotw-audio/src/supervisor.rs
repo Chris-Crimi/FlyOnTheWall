@@ -1048,8 +1048,10 @@ mod tests {
             },
             clock as Arc<dyn Clock>,
             move || {
-                Ok(Box::new(FakeTap::new(open_id.clone(), hint).with_log(open_log.clone()))
-                    as Box<dyn AudioTap>)
+                Ok(
+                    Box::new(FakeTap::new(open_id.clone(), hint).with_log(open_log.clone()))
+                        as Box<dyn AudioTap>,
+                )
             },
             move || sink.sink(),
         );
