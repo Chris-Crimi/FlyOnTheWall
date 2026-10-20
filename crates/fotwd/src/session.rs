@@ -826,10 +826,10 @@ pub struct LocalLegs {
     /// The model both legs share. It loads on the first leg's worker thread.
     pub engine: Arc<dyn RecognizerFactory>,
     /// The far end: everybody else on the call. Always transcribed.
-    pub system: LocalStreamConfig,
+    pub system: Box<LocalStreamConfig>,
     /// The near end: the user. `None` with no input device or the opt-out set,
     /// and not opened if the mic tap did not actually start.
-    pub mic: Option<LocalStreamConfig>,
+    pub mic: Option<Box<LocalStreamConfig>>,
 }
 
 impl LocalLegs {
@@ -843,9 +843,9 @@ impl LocalLegs {
     ) -> Self {
         Self {
             engine,
-            system: LocalStreamConfig::new(session_id, Source::System),
+            system: Box::new(LocalStreamConfig::new(session_id, Source::System)),
             mic: (mic_present && mic_enabled)
-                .then(|| LocalStreamConfig::new(session_id, Source::Mic)),
+                .then(|| Box::new(LocalStreamConfig::new(session_id, Source::Mic))),
         }
     }
 }
@@ -2302,12 +2302,12 @@ fn open_legs(
         Transcription::Local(mut legs) => {
             legs.system.session_id = session_id.to_owned();
             legs.system.session_offset_ms = anchors.system_ms;
-            let (s, s_rx) = LocalStream::open(legs.system, Arc::clone(&legs.engine));
+            let (s, s_rx) = LocalStream::open(*legs.system, Arc::clone(&legs.engine));
             let (m, m_rx) = match legs.mic {
                 Some(mut cfg) if mic_started => {
                     cfg.session_id = session_id.to_owned();
                     cfg.session_offset_ms = anchors.mic_ms;
-                    let (m, rx) = LocalStream::open(cfg, legs.engine);
+                    let (m, rx) = LocalStream::open(*cfg, legs.engine);
                     (Some(Arc::new(LegStream::Local(m))), Some(rx))
                 }
                 _ => (None, None),

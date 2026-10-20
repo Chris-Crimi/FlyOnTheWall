@@ -68,6 +68,12 @@ pub struct EndpointConfig {
     pub margin_db: f32,
     /// The quietest level that can count as speech at all, in dBFS.
     pub speech_floor_db: f32,
+    /// How long a sound has to hold steady before it is taken for the
+    /// background. Longer than any pause-free stretch of one voice.
+    pub floor_window_ms: u64,
+    /// The level swing that separates a voice from the background. A fan, a
+    /// hiss or a hum holds within a few dB; speech swings tens of dB a second.
+    pub min_range_db: f32,
 }
 
 impl Default for EndpointConfig {
@@ -81,6 +87,8 @@ impl Default for EndpointConfig {
             hard_max_ms: 28_000,
             margin_db: 10.0,
             speech_floor_db: -50.0,
+            floor_window_ms: 2_000,
+            min_range_db: 6.0,
         }
     }
 }
@@ -113,15 +121,31 @@ struct Utterance {
     samples: Vec<i16>,
     voiced_ms: u64,
     silence_ms: u64,
+    /// Level range from the onset on, preroll excluded.
+    loudest_db: f32,
+    quietest_db: f32,
 }
 
 /// An energy-based endpointer over 16 kHz mono PCM.
 ///
 /// A frame is speech when it is [`EndpointConfig::margin_db`] above a noise
-/// floor tracked from the frames that are not, and above an absolute floor so
-/// that a near-silent leg (the echo gate's hush is literal zeros) does not
-/// promote its own hiss to speech. Deliberately simple: the model is the
-/// judge of what was said; this only has to find where somebody was talking.
+/// floor, and above an absolute floor so that a near-silent leg (the echo
+/// gate's hush is literal zeros) does not promote its own hiss to speech.
+///
+/// The floor is learned two ways. Frames judged quiet pull it toward their
+/// level. And a sound that has held within
+/// [`min_range_db`](EndpointConfig::min_range_db) for a whole
+/// [`floor_window_ms`](EndpointConfig::floor_window_ms) becomes the floor,
+/// because speech swings and a fan does not. Without that, a background
+/// louder than the absolute floor is taken for speech from its first frame,
+/// and the floor, learning only from frames already judged quiet, never
+/// learns it. Only a steady window moves it: raised during speech, the floor
+/// would climb to the dips between syllables and cut words in two. An
+/// utterance whose level hardly varies is dropped for the same reason, which
+/// catches the couple of seconds before the floor catches up.
+///
+/// Deliberately simple: the model is the judge of what was said; this only
+/// has to find where somebody was talking.
 pub struct Endpointer {
     config: EndpointConfig,
     frame_len: usize,
@@ -131,6 +155,9 @@ pub struct Endpointer {
     /// The leg-clock sample the next frame starts at.
     position: u64,
     noise_db: f32,
+    /// Recent frame levels, newest last, to tell a steady background.
+    recent: VecDeque<f32>,
+    recent_len: usize,
     /// Recent audio while idle, for the preroll.
     preroll: VecDeque<i16>,
     utterance: Option<Utterance>,
@@ -148,6 +175,8 @@ impl Endpointer {
             pending: Vec::new(),
             position: 0,
             noise_db: -60.0,
+            recent: VecDeque::new(),
+            recent_len: (config.floor_window_ms / config.frame_ms.max(1)).max(1) as usize,
             preroll: VecDeque::new(),
             utterance: None,
         }
@@ -182,6 +211,23 @@ impl Endpointer {
         self.position += frame.len() as u64;
         let frame_ms = frame.len() as u64 / SAMPLES_PER_MS;
         let level = level_db(frame);
+        self.recent.push_back(level);
+        if self.recent.len() > self.recent_len {
+            self.recent.pop_front();
+        }
+        // Only over a full window: the first frames of a leg may be its
+        // first word, and a voice swings well past the range in any window.
+        if self.recent.len() == self.recent_len {
+            let (quietest, loudest) = self
+                .recent
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &l| {
+                    (lo.min(l), hi.max(l))
+                });
+            if loudest - quietest < self.config.min_range_db {
+                self.noise_db = self.noise_db.max(quietest).clamp(-90.0, -25.0);
+            }
+        }
         let speech =
             level > (self.noise_db + self.config.margin_db).max(self.config.speech_floor_db);
         if !speech {
@@ -202,6 +248,8 @@ impl Endpointer {
                     samples,
                     voiced_ms: frame_ms,
                     silence_ms: 0,
+                    loudest_db: level,
+                    quietest_db: level,
                 });
             } else {
                 self.preroll.extend(frame);
@@ -212,6 +260,8 @@ impl Endpointer {
         };
 
         utterance.samples.extend_from_slice(frame);
+        utterance.loudest_db = utterance.loudest_db.max(level);
+        utterance.quietest_db = utterance.quietest_db.min(level);
         if speech {
             utterance.voiced_ms += frame_ms;
             utterance.silence_ms = 0;
@@ -229,7 +279,9 @@ impl Endpointer {
 
     fn finish(&mut self) -> Option<Chunk> {
         let utterance = self.utterance.take()?;
-        (utterance.voiced_ms >= self.config.min_speech_ms).then_some(Chunk {
+        let voiced = utterance.voiced_ms >= self.config.min_speech_ms;
+        let varied = utterance.loudest_db - utterance.quietest_db >= self.config.min_range_db;
+        (voiced && varied).then_some(Chunk {
             start_sample: utterance.start_sample,
             samples: utterance.samples,
         })
@@ -631,15 +683,44 @@ mod tests {
 
     const LOUD: i16 = 8_000;
 
+    /// Speech as the endpointer sees it: a square wave whose level swings 20 dB
+    /// every 120 ms, the way syllables do. Only level matters here, and a
+    /// steady tone is no longer speech (see `steady_noise_is_not_speech`).
     fn tone(ms: u64) -> Vec<i16> {
-        // A square wave well above any floor; the endpointer only reads level.
         (0..ms * SAMPLES_PER_MS)
-            .map(|i| if (i / 20) % 2 == 0 { LOUD } else { -LOUD })
+            .map(|i| {
+                let amp = if (i / 1_920) % 2 == 0 {
+                    LOUD
+                } else {
+                    LOUD / 10
+                };
+                if (i / 20) % 2 == 0 { amp } else { -amp }
+            })
             .collect()
     }
 
     fn quiet(ms: u64) -> Vec<i16> {
         vec![0; (ms * SAMPLES_PER_MS) as usize]
+    }
+
+    /// Steady broadband noise at about `db` dBFS: a fan, a hiss, a noisy room.
+    fn noise(ms: u64, db: f32) -> Vec<i16> {
+        // Uniform on [-a, a] has RMS a/sqrt(3).
+        let a = 10f32.powf(db / 20.0) * 32_768.0 * 3f32.sqrt();
+        let mut state = 0x2545_f491_u32;
+        (0..ms * SAMPLES_PER_MS)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                ((state as f32 / u32::MAX as f32) * 2.0 - 1.0) * a
+            })
+            .map(|x| x as i16)
+            .collect()
+    }
+
+    fn mixed(a: &[i16], b: &[i16]) -> Vec<i16> {
+        a.iter().zip(b).map(|(x, y)| x.saturating_add(*y)).collect()
     }
 
     #[test]
@@ -695,6 +776,53 @@ mod tests {
         let done = e.push(&pcm);
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].duration_ms(), 21_030);
+    }
+
+    #[test]
+    fn the_dip_between_syllables_is_not_a_soft_cut() {
+        // A voice never holds steady for the floor's window, so the floor
+        // stays under its dips and a long utterance runs to its next real pause.
+        let mut e = Endpointer::new(EndpointConfig::default());
+        let done = e.push(&tone(27_000));
+        assert!(
+            done.is_empty(),
+            "cut at {:?}",
+            done.first().map(Chunk::duration_ms)
+        );
+    }
+
+    #[test]
+    fn steady_noise_is_not_speech() {
+        // Louder than the absolute speech floor from the first frame: the case
+        // where the floor used to never learn the room, and the model was fed
+        // twenty seconds of fan.
+        let mut e = Endpointer::new(EndpointConfig::default());
+        let mut chunks = e.push(&noise(20_010, -45.0));
+        chunks.extend(e.flush());
+        assert!(chunks.is_empty(), "{} chunk(s)", chunks.len());
+    }
+
+    #[test]
+    fn steady_noise_that_starts_mid_leg_is_not_speech() {
+        let mut e = Endpointer::new(EndpointConfig::default());
+        let mut chunks = e.push(&quiet(2_010));
+        chunks.extend(e.push(&noise(10_020, -45.0)));
+        chunks.extend(e.flush());
+        assert!(chunks.is_empty(), "{} chunk(s)", chunks.len());
+    }
+
+    #[test]
+    fn speech_over_steady_noise_is_still_found() {
+        let mut e = Endpointer::new(EndpointConfig::default());
+        let mut pcm = noise(3_000, -45.0);
+        pcm.extend(mixed(&tone(1_500), &noise(1_500, -45.0)));
+        pcm.extend(noise(3_000, -45.0));
+        let mut chunks = e.push(&pcm);
+        chunks.extend(e.flush());
+        assert_eq!(chunks.len(), 1);
+        // Speech began at 3000 ms, with 300 ms of preroll.
+        assert_eq!(chunks[0].start_ms(), 2_700);
+        assert_eq!(chunks[0].duration_ms(), 300 + 1_500 + 720);
     }
 
     #[test]

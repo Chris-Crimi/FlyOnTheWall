@@ -59,9 +59,14 @@ impl RecognizerFactory for Factory {
     }
 }
 
+/// A square wave whose level swings 20 dB every 120 ms, as syllables do: the
+/// endpointer drops a steady tone as noise.
 fn speech(ms: usize) -> Vec<i16> {
     (0..ms * RATE_PER_MS)
-        .map(|i| if (i / 20) % 2 == 0 { 8_000 } else { -8_000 })
+        .map(|i| {
+            let amp = if (i / 1_920) % 2 == 0 { 8_000 } else { 800 };
+            if (i / 20) % 2 == 0 { amp } else { -amp }
+        })
         .collect()
 }
 
